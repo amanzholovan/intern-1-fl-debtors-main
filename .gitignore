@@ -1,0 +1,7 @@
+venv
+*.env
+.idea
+**.log
+xlsx_files
+**/.pytest_cache
+**__pycache__
