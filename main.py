@@ -347,6 +347,7 @@ class Type5Parser(MainParser):
             if label == 'ИИН':
                 self.labels[i] = 'identifier'
             if label == 'ФИО':
+
                 self.labels[i] = 'fio'
             if label == 'Категория дела':
                 self.labels[i] = 'category'
