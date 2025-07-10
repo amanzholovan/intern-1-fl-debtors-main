@@ -1,3 +1,4 @@
+
 import argparse
 import hashlib
 import json
@@ -48,8 +49,13 @@ class MainParser:
 
     def parse_page(self, page_num: int):
         self.params['p'] = page_num
-        r = self.session.get(url=self.url, params=self.params)
-        r.raise_for_status()
+        try:
+            r = self.session.get(url=self.url, params=self.params)
+            r.raise_for_status()                     # Fail-fast on request error
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching data from {self.url}: {e}")
+            raise SystemExit(1)                      # Stop execution immediately
+
         soup = BeautifulSoup(r.text, 'lxml')
 
         thead = soup.find('thead')
@@ -92,14 +98,23 @@ class MainParser:
         return hash_value
 
     def send_to_upsert(self, debtors):
-        self.crud.bulk_upsert(debtors)
-        self.upserted_count += len(debtors)
-        logging.info(f'##### Current State: {self.state}')
+        try:
+            self.crud.bulk_upsert(debtors)
+            self.upserted_count += len(debtors)
+            logging.info(f'##### Current State: {self.state}')
+        except Exception as e:
+            logging.error(f"Error during upsert operation: {e}")
+            raise SystemExit(1)  # Fail-fast if database operation fails
 
     def delete_old(self):
-        logging.info(f"##### Deleting rows older than {self.start_time} with type_id {self.debt_type}")
-        self.total_deleted = self.crud.delete_all(to_date=self.start_time, type_id=self.debt_type)
-        logging.info(f"##### Cleanup completed! Deleted {self.total_deleted} rows")
+        try:
+            logging.info(f"##### Deleting rows older than {self.start_time} with type_id {self.debt_type}")  #deleting
+            self.total_deleted = self.crud.delete_all(to_date=self.start_time, type_id=self.debt_type)
+            logging.info(f"##### Cleanup completed! Deleted {self.total_deleted} rows")
+        except Exception as e:
+            logging.error(f"Error during cleanup: {e}")
+            raise SystemExit(1)
+
 
     def start(self):
         page_num = 1
@@ -347,7 +362,6 @@ class Type5Parser(MainParser):
             if label == 'ИИН':
                 self.labels[i] = 'identifier'
             if label == 'ФИО':
-
                 self.labels[i] = 'fio'
             if label == 'Категория дела':
                 self.labels[i] = 'category'
@@ -432,15 +446,15 @@ class Type6Parser(MainParser):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Parser for fl debtor",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    parser.add_argument(
-        "-t", "--type_id",
-        required=True,
-    )
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser(
+    #     description="Parser for fl debtor",
+    #     formatter_class=argparse.RawTextHelpFormatter,
+    # )
+    # parser.add_argument(
+    #     "-t", "--type_id",
+    #     required=True,
+    # )
+    # args = parser.parse_args()
     parsers = [
         Type1Parser,
         Type2Parser,
@@ -450,10 +464,8 @@ if __name__ == "__main__":
         Type6Parser,
     ]
     try:
-        parser_type = int(args.type_id)
-        class_selected = parsers[parser_type - 1]
-
-        p = class_selected()
+        parser_type = 1
+        p = parsers[parser_type - 1]()
         p.start()
         p.close()
     except Exception as e:
