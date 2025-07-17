@@ -1,4 +1,5 @@
 import datetime
+import logging
 from typing import List, Type
 
 from sqlalchemy import and_
@@ -15,7 +16,7 @@ class DebtorCrud:
     def get_by_identifier(self, identifier: str) -> List[Type[Debtor]]:
         return self.session.query(Debtor).options(
             joinedload(Debtor.debt_type),
-        ).filter_by(identifier=identifier).all()
+        ).filter_by(identifier=identifier.all)
 
     def create_status(self, debtor_obj) -> Debtor:
         model_dict = debtor_obj.model_dump()
@@ -39,16 +40,28 @@ class DebtorCrud:
         self.session.commit()
         return deleted_rows
 
+    def check_duplicate_debtor(self, app_num: str, fio: str) -> bool:
+        return self.session.query(Debtor).filter(
+            Debtor.app_num == app_num,
+            Debtor.fio == fio
+        ).first() is not None
+
     def bulk_upsert(self, data: List[dict]):
-        insert_stmt = insert(Debtor).values(data)
-        upsert_stmt = insert_stmt.on_conflict_do_update(
-            set_={
-                'last_updated': datetime.datetime.now(),
-            },
-            constraint='uq_has_value',
-        )
-        self.session.execute(upsert_stmt)
-        self.session.commit()
+        try:
+            insert_stmt = insert(Debtor).values(data)
+            upsert_stmt = insert_stmt.on_conflict_do_update(
+                set_={
+                    'last_updated': datetime.datetime.now(),
+                },
+                constraint='uq_has_value',
+            )
+
+            self.session.execute(upsert_stmt)
+            self.session.commit()
+
+
+        except Exception as e:
+            logging.exception(e)
 
     def delete_all(self, to_date: str, type_id: int):
         deleted_count = self.session.query(Debtor).filter(

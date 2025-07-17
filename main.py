@@ -1,4 +1,3 @@
-
 import argparse
 import hashlib
 import json
@@ -8,6 +7,10 @@ import random
 import re
 import datetime
 import time
+import requests
+import sqlalchemy as sa
+
+logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -15,6 +18,9 @@ from sqlalchemy.orm import Session
 from db.connection import SessionLocal
 from utils import requests_retry_session
 from crud import DebtorCrud
+from db.models import Debtor
+
+
 
 
 class MainParser:
@@ -40,15 +46,99 @@ class MainParser:
         logging.info(f"type_id: {self.debt_type}, start time: {self.start_time}")
         logging.info("*" * 30)
 
+    def shadow_prepare_tables(self):
+        engine = self.crud.session.get_bind()
+        conn = engine.connect()
+        try:
+            logging.info(f"Удаляем таблицу {self.shadow_table_name} если она существует.")
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {self.shadow_table_name} CASCADE"))
+
+            logging.info(f"Создаем таблицу {self.shadow_table_name}.")
+            conn.execute(sa.text(f"CREATE TABLE {self.shadow_table_name} (LIKE {self.base_table_name} INCLUDING ALL)"))
+            logging.info(f"Таблица {self.shadow_table_name} успешно создана.")
+        except Exception as e:
+            logging.error(f"Ошибка при подготовке shadow таблицы: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def shadow_swap_tables(self):
+        engine = self.crud.session.get_bind()
+        conn = engine.connect()
+        transaction = conn.begin()
+        try:
+            result = conn.execute(sa.text("SELECT to_regclass('public.debtor')"))
+            if result.fetchone()[0] is None:
+                raise ValueError("Таблица debtor не существует.")
+            logging.info("Таблица debtor существует.")
+
+            result = conn.execute(sa.text("SELECT to_regclass('public.debtor_shadow')"))
+            if result.fetchone()[0] is None:
+                raise ValueError(f"Таблица {self.shadow_table_name} не существует.")
+            logging.info(f"Таблица {self.shadow_table_name} существует.")
+
+            url = f'{self.url}{self.debt_type}?p=1'
+            data = self.parse_page(1)
+
+            if not data:
+                logging.warning("Нет данных для записи в таблицу.")
+                return
+
+            columns = ', '.join(self.labels.values())
+            values_placeholder = ', '.join(['%s'] * len(self.labels))
+
+            logging.info(f"Записываем данные в таблицу {self.shadow_table_name}.")
+            for debtor in data:
+                values = [debtor[label] for label in self.labels.values()]
+                conn.execute(
+                    sa.text(f"INSERT INTO {self.shadow_table_name} ({columns}) VALUES ({values_placeholder})"),
+                    values
+                )
+            logging.info(f"Данные успешно записаны в {self.shadow_table_name}.")
+
+            logging.info(f"Переименование таблицы {self.base_table_name} в {self.base_table_name}_backup.")
+            conn.execute(sa.text(f"ALTER TABLE {self.base_table_name} RENAME TO {self.base_table_name}_backup"))
+            logging.info(f"Таблица {self.base_table_name} переименована в {self.base_table_name}_backup.")
+
+            logging.info(f"Переименование таблицы {self.shadow_table_name} в {self.base_table_name}.")
+            conn.execute(sa.text(f"ALTER TABLE {self.shadow_table_name} RENAME TO {self.base_table_name}"))
+            logging.info(f"Таблица {self.shadow_table_name} переименована в {self.base_table_name}.")
+
+            # Drop backup table
+            logging.info(f"Удаляем таблицу {self.base_table_name}_backup если она существует.")
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {self.base_table_name}_backup"))
+            logging.info(f"Таблица {self.base_table_name}_backup удалена.")
+
+            logging.info(f"Таблицы успешно переименованы: `{self.shadow_table_name}` теперь `{self.base_table_name}`.")
+
+            transaction.commit()
+        except Exception as e:
+            logging.error(f"Ошибка при переименовании таблиц: {e}")
+            transaction.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def shadow_migration(self):
+        logging.info("Shadow Migration Start")
+        self.shadow_prepare_tables()
+        self.start()
+        self.shadow_swap_tables()
+        logging.info("Shadow Migration Completed")
+
+    @property
+    def base_table_name(self):
+        return Debtor.__tablename__
+
+    @property
+    def shadow_table_name(self):
+        return self.base_table_name + "_shadow"
     def set_logging(self):
-        logging.basicConfig(
-            handlers=[logging.FileHandler(f'type_{self.debt_type}.log', "a+", "utf-8")],
-            format="%(asctime)s %(levelname)s: %(message)s",
-            level=logging.INFO,
-        )
+        pass
 
     def parse_page(self, page_num: int):
         self.params['p'] = page_num
+        self.params['limit'] = 100
         try:
             r = self.session.get(url=self.url, params=self.params)
             r.raise_for_status()                     # Fail-fast on request error
@@ -181,7 +271,10 @@ class Type1Parser(MainParser):
         tds = tr.find_all('td')
         debtor_data = {"debt_type_id": self.debt_type}
         for i, label in self.labels.items():
-            debtor_data[label] = tds[i].text
+            debtor_data[label] = tds[i].text if len(tds) > i else None
+
+        if not debtor_data.get('identifier'):    #none
+            debtor_data['identifier'] = None
 
         if isinstance(debtor_data['debt_sum'], str):
             debtor_data['debt_sum'] = re.sub(r'\D', '', debtor_data['debt_sum'])
@@ -466,7 +559,6 @@ if __name__ == "__main__":
     try:
         parser_type = 1
         p = parsers[parser_type - 1]()
-        p.start()
-        p.close()
+        p.shadow_migration()
     except Exception as e:
         logging.exception(e)
